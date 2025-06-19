@@ -229,14 +229,15 @@ export class DBOperations {
   public async getDbPath(): Promise<string> {
     const vaultRoot = this.app.vault.getRoot().path;
     let baseDir: string;
+    const indexDir = getSettings().activeIndexDir || "";
 
     if (getSettings().enableIndexSync) {
-      baseDir = this.app.vault.configDir;
+      baseDir = `${this.app.vault.configDir}/${indexDir}/.copilot-index`.replace(/\/+/g, "/");
     } else {
       // If vaultRoot is just "/", treat it as empty
       const effectiveRoot = vaultRoot === "/" ? "" : vaultRoot;
       const prefix = effectiveRoot === "" || effectiveRoot.startsWith("/") ? "" : "/";
-      baseDir = `${prefix}${effectiveRoot}/.copilot-index`;
+      baseDir = `${prefix}${effectiveRoot}/${indexDir}/.copilot-index`.replace(/\/+/g, "/");
 
       // Ensure the directory exists
       if (!(await this.app.vault.adapter.exists(baseDir))) {
