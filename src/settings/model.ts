@@ -77,6 +77,8 @@ export interface CopilotSettings {
   chatNoteContextPath: string;
   chatNoteContextTags: string[];
   enableIndexSync: boolean;
+  /** Directory relative to vault root for storing Copilot index */
+  activeIndexDir: string;
   debug: boolean;
   enableEncryption: boolean;
   maxSourceChunks: number;
@@ -225,6 +227,10 @@ export function sanitizeSettings(settings: CopilotSettings): CopilotSettings {
   // Ensure includeActiveNoteAsContext has a default value
   if (typeof sanitizedSettings.includeActiveNoteAsContext !== "boolean") {
     sanitizedSettings.includeActiveNoteAsContext = DEFAULT_SETTINGS.includeActiveNoteAsContext;
+  }
+
+  if (!sanitizedSettings.activeIndexDir && sanitizedSettings.activeIndexDir !== "") {
+    sanitizedSettings.activeIndexDir = DEFAULT_SETTINGS.activeIndexDir;
   }
 
   // Ensure passMarkdownImages has a default value

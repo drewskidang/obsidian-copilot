@@ -223,6 +223,15 @@ export const QASettings: React.FC = () => {
             onCheckedChange={(checked) => updateSetting("enableIndexSync", checked)}
           />
 
+          {/* Index directory */}
+          <SettingItem
+            type="text"
+            title="Index directory"
+            description="Relative path of directory to index. Leave empty to index entire vault."
+            value={settings.activeIndexDir}
+            onChange={(value) => updateSetting("activeIndexDir", value)}
+          />
+
           {/* Disable index loading on mobile */}
           <SettingItem
             type="switch"

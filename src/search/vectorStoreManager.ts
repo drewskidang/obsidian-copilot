@@ -42,8 +42,11 @@ export default class VectorStoreManager {
       const prevSettings = this.lastKnownSettings;
       this.lastKnownSettings = { ...settings };
 
-      // Handle path changes (enableIndexSync)
-      if (settings.enableIndexSync !== prevSettings?.enableIndexSync) {
+      // Handle path changes (enableIndexSync or activeIndexDir)
+      if (
+        settings.enableIndexSync !== prevSettings?.enableIndexSync ||
+        settings.activeIndexDir !== prevSettings?.activeIndexDir
+      ) {
         const newPath = await this.dbOps.getDbPath();
         const oldPath = this.dbOps.getCurrentDbPath();
 

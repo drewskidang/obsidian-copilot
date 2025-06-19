@@ -273,7 +273,10 @@ export class IndexOperations {
 
   private async getFilesToIndex(overwrite?: boolean): Promise<TFile[]> {
     const { inclusions, exclusions } = getMatchingPatterns();
-    const allMarkdownFiles = this.app.vault.getMarkdownFiles();
+    const indexDir = getSettings().activeIndexDir;
+    const allMarkdownFiles = this.app.vault
+      .getMarkdownFiles()
+      .filter((file) => !indexDir || file.path.startsWith(indexDir));
 
     // If overwrite is true, return all markdown files that match current filters
     if (overwrite) {

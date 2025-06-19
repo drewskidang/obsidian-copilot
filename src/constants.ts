@@ -637,6 +637,7 @@ export const DEFAULT_SETTINGS: CopilotSettings = {
   chatNoteContextPath: "",
   chatNoteContextTags: [],
   enableIndexSync: true,
+  activeIndexDir: "",
   debug: false,
   enableEncryption: false,
   maxSourceChunks: 3,
