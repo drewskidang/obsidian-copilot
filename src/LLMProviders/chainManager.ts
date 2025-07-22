@@ -18,7 +18,7 @@ import { logError, logInfo } from "@/logger";
 import { HybridRetriever } from "@/search/hybridRetriever";
 import VectorStoreManager from "@/search/vectorStoreManager";
 import { getSettings, getSystemPrompt, subscribeToSettingsChange } from "@/settings/model";
-import { ChatMessage } from "@/sharedState";
+import { ChatMessage } from "@/types/message";
 import { findCustomModel, isOSeriesModel, isSupportedChain } from "@/utils";
 import {
   ChatPromptTemplate,
@@ -32,6 +32,8 @@ import MemoryManager from "./memoryManager";
 import PromptManager from "./promptManager";
 
 export default class ChainManager {
+  // TODO: These chains are deprecated since we now use direct chat model calls in chain runners
+  // Consider removing after verifying no dependencies remain
   private chain: RunnableSequence;
   private retrievalChain: RunnableSequence;
   private retrievedDocuments: Document[] = [];
@@ -46,13 +48,7 @@ export default class ChainManager {
   public memoryManager: MemoryManager;
   public promptManager: PromptManager;
 
-  // A chat history that stores the messages sent and received
-  // Only reset when the user explicitly clicks "New Chat"
-  private chatMessages: ChatMessage[] = [];
-
   constructor(app: App, vectorStoreManager: VectorStoreManager) {
-    this.chatMessages = [];
-
     // Instantiate singletons
     this.app = app;
     this.vectorStoreManager = vectorStoreManager;
@@ -72,6 +68,8 @@ export default class ChainManager {
     await this.createChainWithNewModel();
   }
 
+  // TODO: These methods are deprecated - chain runners now use direct chat model calls
+  // Remove after confirming no usage remains
   public getChain(): RunnableSequence {
     return this.chain;
   }
@@ -93,6 +91,8 @@ export default class ChainManager {
     }
   }
 
+  // TODO: This method is deprecated - chain validation no longer needed
+  // Remove after confirming no dependencies
   private validateChainInitialization() {
     if (!this.chain || !isSupportedChain(this.chain)) {
       console.error("Chain is not initialized properly, re-initializing chain: ", getChainType());
@@ -175,6 +175,8 @@ export default class ChainManager {
     }
   }
 
+  // TODO: This method is deprecated - chain runners now handle chain logic directly
+  // Remove after confirming no usage remains
   async setChain(chainType: ChainType, options: SetChainOptions = {}): Promise<void> {
     if (!this.chatModelManager.validateChatModel(this.chatModelManager.getChatModel())) {
       console.error("setChain failed: No chat model set.");
@@ -190,6 +192,7 @@ export default class ChainManager {
 
     switch (chainType) {
       case ChainType.LLM_CHAIN: {
+        // TODO: LLMChainRunner now handles this directly without chains
         this.chain = ChainFactory.createNewLLMChain({
           llm: chatModel,
           memory: memory,
@@ -202,6 +205,7 @@ export default class ChainManager {
       }
 
       case ChainType.VAULT_QA_CHAIN: {
+        // TODO: VaultQAChainRunner now handles this directly without chains
         await this.initializeQAChain(options);
 
         const retriever = new HybridRetriever({
@@ -348,21 +352,5 @@ export default class ChainManager {
           .saveContext({ input: userMsg.message }, { output: aiMsg.message });
       }
     }
-  }
-
-  public clearHistory() {
-    this.chatMessages = [];
-  }
-
-  public getChatMessages(): ChatMessage[] {
-    return this.chatMessages;
-  }
-
-  public setChatMessages(messages: ChatMessage[]) {
-    this.chatMessages = [...messages];
-  }
-
-  public addChatMessage(message: ChatMessage) {
-    this.chatMessages.push(message);
   }
 }

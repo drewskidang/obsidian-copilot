@@ -19,12 +19,19 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { ModelDisplay } from "@/components/ui/model-display";
 import { ContextProcessor } from "@/contextProcessor";
-import { CustomPromptProcessor } from "@/customPromptProcessor";
+import { CustomCommandManager } from "@/commands/customCommandManager";
 import { COPILOT_TOOL_NAMES } from "@/LLMProviders/intentAnalyzer";
 import { Mention } from "@/mentions/Mention";
 import { getModelKeyFromModel, useSettingsValue } from "@/settings/model";
+import { SelectedTextContext } from "@/types/message";
 import { getToolDescription } from "@/tools/toolManager";
-import { checkModelApiKey, err2String, extractNoteFiles, isNoteTitleUnique } from "@/utils";
+import {
+  checkModelApiKey,
+  err2String,
+  extractNoteFiles,
+  isAllowedFileForContext,
+  isNoteTitleUnique,
+} from "@/utils";
 import {
   ArrowBigUp,
   ChevronDown,
@@ -47,6 +54,8 @@ import React, {
 } from "react";
 import { useDropzone } from "react-dropzone";
 import ContextControl from "./ContextControl";
+import { getCachedCustomCommands } from "@/commands/state";
+import { sortSlashCommands } from "@/commands/customCommandUtils";
 
 interface ChatInputProps {
   inputMessage: string;
@@ -68,6 +77,8 @@ interface ChatInputProps {
   onAddImage: (files: File[]) => void;
   setSelectedImages: React.Dispatch<React.SetStateAction<File[]>>;
   disableModelSwitch?: boolean;
+  selectedTextContexts?: SelectedTextContext[];
+  onRemoveSelectedText?: (id: string) => void;
 }
 
 const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
@@ -88,6 +99,8 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       onAddImage,
       setSelectedImages,
       disableModelSwitch,
+      selectedTextContexts,
+      onRemoveSelectedText,
     },
     ref
   ) => {
@@ -99,9 +112,10 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
     const [modelError, setModelError] = useState<string | null>(null);
     const [currentChain] = useChainType();
     const [isProjectLoading] = useProjectLoading();
-    const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(
-      app.workspace.getActiveFile()
-    );
+    const [currentActiveNote, setCurrentActiveNote] = useState<TFile | null>(() => {
+      const activeFile = app.workspace.getActiveFile();
+      return isAllowedFileForContext(activeFile) ? activeFile : null;
+    });
     const [selectedProject, setSelectedProject] = useState<ProjectConfig | null>(null);
     const settings = useSettingsValue();
     const isCopilotPlus =
@@ -173,6 +187,15 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       const inputValue = event.target.value;
       const cursorPos = event.target.selectionStart;
 
+      // Check for slash BEFORE updating state
+      // Only show slash modal if:
+      // 1. We just typed a "/" AND
+      // 2. Either the input is empty OR there's a space before the "/"
+      const shouldShowSlashModal =
+        cursorPos > 0 &&
+        inputValue[cursorPos - 1] === "/" &&
+        (cursorPos === 1 || inputValue[cursorPos - 2] === " ");
+
       setInputMessage(inputValue);
       adjustTextareaHeight();
 
@@ -189,8 +212,9 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       // Handle other input triggers
       if (cursorPos >= 2 && inputValue.slice(cursorPos - 2, cursorPos) === "[[") {
         showNoteTitleModal(cursorPos);
-      } else if (inputValue === "/") {
-        showCustomPromptModal();
+      } else if (shouldShowSlashModal) {
+        // Pass the inputValue directly to ensure we use the current value
+        showCustomPromptModal(cursorPos, inputValue);
       } else if (inputValue.slice(-1) === "@" && isCopilotPlus) {
         showCopilotPlusOptionsModal();
       }
@@ -250,18 +274,45 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
       fetchNoteTitles();
     };
 
-    const showCustomPromptModal = async () => {
-      const customPromptProcessor = CustomPromptProcessor.getInstance(app.vault);
-      const prompts = await customPromptProcessor.getAllPrompts();
-      const promptTitles = prompts.map((prompt) => prompt.title);
+    const showCustomPromptModal = (cursorPos: number, currentInputValue: string) => {
+      const commandManager = CustomCommandManager.getInstance();
+      const commands = getCachedCustomCommands();
+      const slashCommands = sortSlashCommands(
+        commands.filter((command) => command.showInSlashMenu)
+      );
+      const commandTitles = slashCommands.map((command) => command.title);
 
-      new ListPromptModal(app, promptTitles, async (promptTitle: string) => {
-        const selectedPrompt = prompts.find((prompt) => prompt.title === promptTitle);
-        if (selectedPrompt) {
-          customPromptProcessor.recordPromptUsage(selectedPrompt.title);
-          setInputMessage(selectedPrompt.content);
+      // Use the passed input value and cursor position
+      const slashPosition = cursorPos - 1;
+
+      const modal = new ListPromptModal(app, commandTitles, (commandTitle: string) => {
+        const selectedCommand = slashCommands.find((command) => command.title === commandTitle);
+        if (selectedCommand) {
+          commandManager.recordUsage(selectedCommand);
+
+          // Replace the "/" with the command content
+          let before = "";
+          let after = "";
+
+          if (slashPosition >= 0 && currentInputValue[slashPosition] === "/") {
+            before = currentInputValue.slice(0, slashPosition);
+            after = currentInputValue.slice(slashPosition + 1);
+          }
+
+          const newInputMessage = before + selectedCommand.content + after;
+          setInputMessage(newInputMessage);
+
+          // Set cursor position after the inserted command content
+          setTimeout(() => {
+            if (textAreaRef.current) {
+              const newCursorPos = before.length + selectedCommand.content.length;
+              textAreaRef.current.setSelectionRange(newCursorPos, newCursorPos);
+              textAreaRef.current.focus();
+            }
+          }, 0);
         }
-      }).open();
+      });
+      modal.open();
     };
 
     const showCopilotPlusOptionsModal = () => {
@@ -397,7 +448,7 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
         // Set new timeout
         timeoutId = setTimeout(() => {
           const activeNote = app.workspace.getActiveFile();
-          setCurrentActiveNote(activeNote);
+          setCurrentActiveNote(isAllowedFileForContext(activeNote) ? activeNote : null);
         }, 100); // Wait 100ms after the last event because it fires multiple times
       };
 
@@ -445,6 +496,8 @@ const ChatInput = forwardRef<{ focus: () => void }, ChatInputProps>(
           activeNote={currentActiveNote}
           contextUrls={contextUrls}
           onRemoveUrl={(url: string) => setContextUrls((prev) => prev.filter((u) => u !== url))}
+          selectedTextContexts={selectedTextContexts}
+          onRemoveSelectedText={onRemoveSelectedText}
         />
 
         {selectedImages.length > 0 && (

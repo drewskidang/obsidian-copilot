@@ -1,30 +1,22 @@
+import { addSelectedTextContext, getChainType } from "@/aiParams";
 import { FileCache } from "@/cache/fileCache";
 import { ProjectContextCache } from "@/cache/projectContextCache";
-import {
-  getCommandById,
-  getCommandId,
-  getInlineEditCommands,
-} from "@/commands/inlineEditCommandUtils";
-import { AddPromptModal } from "@/components/modals/AddPromptModal";
+import { ChainType } from "@/chainFactory";
 import { AdhocPromptModal } from "@/components/modals/AdhocPromptModal";
 import { DebugSearchModal } from "@/components/modals/DebugSearchModal";
-import { InlineEditModal } from "@/components/modals/InlineEditModal";
-import { ListPromptModal } from "@/components/modals/ListPromptModal";
 import { OramaSearchModal } from "@/components/modals/OramaSearchModal";
 import { RemoveFromIndexModal } from "@/components/modals/RemoveFromIndexModal";
-import { CustomPromptProcessor } from "@/customPromptProcessor";
-import { logError } from "@/logger";
 import CopilotPlugin from "@/main";
 import { getAllQAMarkdownContent } from "@/search/searchUtils";
-import {
-  CopilotSettings,
-  InlineEditCommandSettings,
-  getSettings,
-  updateSetting,
-} from "@/settings/model";
-import { err2String } from "@/utils";
+import { CopilotSettings, getSettings, updateSetting } from "@/settings/model";
+import { SelectedTextContext } from "@/types/message";
 import { Editor, Notice, TFile } from "obsidian";
+import { v4 as uuidv4 } from "uuid";
 import { COMMAND_IDS, COMMAND_NAMES, CommandId } from "../constants";
+import { CustomCommandSettingsModal } from "@/commands/CustomCommandSettingsModal";
+import { EMPTY_COMMAND } from "@/commands/constants";
+import { getCachedCustomCommands } from "@/commands/state";
+import { CustomCommandManager } from "@/commands/customCommandManager";
 
 /**
  * Add a command to the plugin.
@@ -67,67 +59,11 @@ export function addCheckCommand(
   });
 }
 
-/**
- * Process an inline edit command and display a modal with the processed prompt.
- */
-async function processInlineEditCommand(editor: Editor, commandId: string) {
-  const selectedText = editor.getSelection().trim();
-  if (!selectedText) {
-    return;
-  }
-
-  const command = getCommandById(commandId);
-  if (!command) {
-    logError(`Command not found for id ${commandId}`);
-    return;
-  }
-
-  new InlineEditModal(app, {
-    selectedText,
-    command,
-  }).open();
-}
-
-export function registerInlineEditCommands(
-  plugin: CopilotPlugin,
-  prevCommands: InlineEditCommandSettings[],
-  nextCommands: InlineEditCommandSettings[]
-) {
-  prevCommands.forEach((command) => {
-    const id = getCommandId(command.name);
-    if (id) {
-      // removeCommand is not available in TypeScript for some reasons
-      // https://docs.obsidian.md/Reference/TypeScript+API/Plugin/removeCommand
-      (plugin as any).removeCommand(id);
-    }
-  });
-
-  nextCommands.forEach((command) => {
-    const id = getCommandId(command.name);
-    plugin.addCommand({
-      id,
-      name: command.name,
-      editorCallback: (editor) => {
-        processInlineEditCommand(editor, id);
-      },
-    });
-  });
-}
-
 export function registerCommands(
   plugin: CopilotPlugin,
   prev: CopilotSettings | undefined,
   next: CopilotSettings
 ) {
-  registerInlineEditCommands(
-    plugin,
-    prev?.inlineEditCommands ?? [],
-    // If a user comes from a legacy version and doesn't have inlineEditCommands
-    // in settings, we use the default commands.
-    next.inlineEditCommands ?? getInlineEditCommands()
-  );
-  const promptProcessor = CustomPromptProcessor.getInstance(plugin.app.vault);
-
   addEditorCommand(plugin, COMMAND_IDS.COUNT_WORD_AND_TOKENS_SELECTION, async (editor: Editor) => {
     const selectedText = await editor.getSelection();
     const wordCount = selectedText.split(" ").length;
@@ -162,41 +98,6 @@ export function registerCommands(
     plugin.newChat();
   });
 
-  addCommand(plugin, COMMAND_IDS.ADD_CUSTOM_PROMPT, () => {
-    new AddPromptModal(plugin.app, async (title: string, prompt: string) => {
-      try {
-        await promptProcessor.savePrompt(title, prompt);
-        new Notice("Custom prompt saved successfully.");
-      } catch (e) {
-        const msg = "An error occurred while saving the custom prompt: " + err2String(e);
-        console.error(msg);
-        throw new Error(msg);
-      }
-    }).open();
-  });
-
-  addCommand(plugin, COMMAND_IDS.APPLY_CUSTOM_PROMPT, async () => {
-    const prompts = await promptProcessor.getAllPrompts();
-    const promptTitles = prompts.map((p) => p.title);
-    new ListPromptModal(plugin.app, promptTitles, async (promptTitle: string) => {
-      if (!promptTitle) {
-        new Notice("Please select a prompt title.");
-        return;
-      }
-      try {
-        const prompt = await promptProcessor.getPrompt(promptTitle);
-        if (!prompt) {
-          new Notice(`No prompt found with the title "${promptTitle}".`);
-          return;
-        }
-        plugin.processCustomPrompt(COMMAND_IDS.APPLY_CUSTOM_PROMPT, prompt.content);
-      } catch (err) {
-        console.error(err);
-        new Notice("An error occurred.");
-      }
-    }).open();
-  });
-
   addCommand(plugin, COMMAND_IDS.APPLY_ADHOC_PROMPT, async () => {
     const modal = new AdhocPromptModal(plugin.app, async (adhocPrompt: string) => {
       try {
@@ -208,76 +109,6 @@ export function registerCommands(
     });
 
     modal.open();
-  });
-
-  addCheckCommand(plugin, COMMAND_IDS.DELETE_CUSTOM_PROMPT, (checking: boolean) => {
-    if (checking) {
-      return true;
-    }
-
-    promptProcessor.getAllPrompts().then((prompts) => {
-      const promptTitles = prompts.map((p) => p.title);
-      new ListPromptModal(plugin.app, promptTitles, async (promptTitle: string) => {
-        if (!promptTitle) {
-          new Notice("Please select a prompt title.");
-          return;
-        }
-
-        try {
-          await promptProcessor.deletePrompt(promptTitle);
-          new Notice(`Prompt "${promptTitle}" has been deleted.`);
-        } catch (err) {
-          console.error(err);
-          new Notice("An error occurred while deleting the prompt.");
-        }
-      }).open();
-    });
-    return true;
-  });
-
-  addCheckCommand(plugin, COMMAND_IDS.EDIT_CUSTOM_PROMPT, (checking: boolean) => {
-    if (checking) {
-      return true;
-    }
-
-    promptProcessor.getAllPrompts().then((prompts) => {
-      const promptTitles = prompts.map((p) => p.title);
-      new ListPromptModal(plugin.app, promptTitles, async (promptTitle: string) => {
-        if (!promptTitle) {
-          new Notice("Please select a prompt title.");
-          return;
-        }
-
-        try {
-          const prompt = await promptProcessor.getPrompt(promptTitle);
-          if (prompt) {
-            new AddPromptModal(
-              plugin.app,
-              async (title: string, newPrompt: string) => {
-                try {
-                  await promptProcessor.updatePrompt(promptTitle, title, newPrompt);
-                  new Notice(`Prompt "${title}" has been updated.`);
-                } catch (err) {
-                  const msg =
-                    "An error occurred while updating the custom prompt: " + err2String(err);
-                  console.error(msg);
-                  throw new Error(msg);
-                }
-              },
-              prompt.title,
-              prompt.content,
-              false
-            ).open();
-          } else {
-            new Notice(`No prompt found with the title "${promptTitle}".`);
-          }
-        } catch (err) {
-          console.error(err);
-          new Notice("An error occurred.");
-        }
-      }).open();
-    });
-    return true;
   });
 
   addCommand(plugin, COMMAND_IDS.CLEAR_LOCAL_COPILOT_INDEX, async () => {
@@ -461,5 +292,71 @@ export function registerCommands(
     const newValue = !currentSettings.enableAutocomplete;
     updateSetting("enableAutocomplete", newValue);
     new Notice(`Copilot autocomplete ${newValue ? "enabled" : "disabled"}`);
+  });
+
+  // Add selection to chat context command
+  addEditorCommand(plugin, COMMAND_IDS.ADD_SELECTION_TO_CHAT_CONTEXT, async (editor: Editor) => {
+    // Check if we're in Copilot Plus mode
+    const currentChainType = getChainType();
+    if (
+      currentChainType !== ChainType.COPILOT_PLUS_CHAIN &&
+      currentChainType !== ChainType.PROJECT_CHAIN
+    ) {
+      new Notice("Selected text context is only available in Copilot Plus and Project modes");
+      return;
+    }
+
+    const selectedText = editor.getSelection();
+    if (!selectedText) {
+      new Notice("No text selected");
+      return;
+    }
+
+    const activeFile = plugin.app.workspace.getActiveFile();
+    if (!activeFile) {
+      new Notice("No active file");
+      return;
+    }
+
+    // Get selection range to determine line numbers
+    const selectionRange = editor.listSelections()[0];
+    if (!selectionRange) {
+      new Notice("Could not determine selection range");
+      return;
+    }
+
+    const startLine = selectionRange.anchor.line + 1; // Convert to 1-based line numbers
+    const endLine = selectionRange.head.line + 1;
+
+    // Create selected text context
+    const selectedTextContext: SelectedTextContext = {
+      id: uuidv4(),
+      content: selectedText,
+      noteTitle: activeFile.basename,
+      notePath: activeFile.path,
+      startLine: Math.min(startLine, endLine),
+      endLine: Math.max(startLine, endLine),
+    };
+
+    // Add to selected text contexts atom
+    addSelectedTextContext(selectedTextContext);
+
+    // Open chat window to show the context was added
+    plugin.activateView();
+  });
+
+  // Add command to create a new custom command
+  addCommand(plugin, COMMAND_IDS.ADD_CUSTOM_COMMAND, async () => {
+    const commands = getCachedCustomCommands();
+    const newCommand = { ...EMPTY_COMMAND };
+    const modal = new CustomCommandSettingsModal(
+      plugin.app,
+      commands,
+      newCommand,
+      async (updatedCommand) => {
+        await CustomCommandManager.getInstance().createCommand(updatedCommand);
+      }
+    );
+    modal.open();
   });
 }

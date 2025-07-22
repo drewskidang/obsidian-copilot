@@ -1,5 +1,5 @@
 import { ProjectConfig, setCurrentProject } from "@/aiParams";
-import { AddProjectModal } from "@/components/modals/AddProjectModal";
+import { AddProjectModal } from "@/components/modals/project/AddProjectModal";
 import { ConfirmModal } from "@/components/modals/ConfirmModal";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -11,6 +11,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { SearchBar } from "@/components/ui/SearchBar";
 import { cn } from "@/lib/utils";
 import { logError } from "@/logger";
 import { updateSetting } from "@/settings/model";
@@ -22,11 +23,13 @@ import {
   Info,
   MessageSquare,
   Plus,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
 import { App, Notice } from "obsidian";
-import React, { memo, useEffect, useState } from "react";
+import React, { memo, useEffect, useMemo, useState } from "react";
+import { filterProjects } from "@/utils/projectUtils";
 
 function ProjectItem({
   project,
@@ -143,6 +146,7 @@ export const ProjectList = memo(
     const [isOpen, setIsOpen] = useState(defaultOpen);
     const [showChatInput, setShowChatInput] = useState(false);
     const [selectedProject, setSelectedProject] = useState<ProjectConfig | null>(null);
+    const [searchQuery, setSearchQuery] = useState("");
 
     // Auto collapse when messages appear
     useEffect(() => {
@@ -150,6 +154,11 @@ export const ProjectList = memo(
         setIsOpen(false);
       }
     }, [hasMessages]);
+
+    // Filter projects based on search query
+    const filteredProjects = useMemo(() => {
+      return filterProjects(projects, searchQuery);
+    }, [projects, searchQuery]);
 
     const handleAddProject = () => {
       const modal = new AddProjectModal(app, async (project: ProjectConfig) => {
@@ -342,9 +351,21 @@ export const ProjectList = memo(
                 )}
                 <CollapsibleContent className="tw-transition-all tw-duration-200 tw-ease-in-out">
                   <div className="tw-relative tw-bg-secondary/30">
+                    {/* Search input box */}
+                    {projects.length > 0 && (
+                      <div className="tw-px-4 tw-pb-2 tw-pt-3">
+                        <div className="tw-relative">
+                          <SearchBar
+                            value={searchQuery}
+                            onChange={setSearchQuery}
+                            placeholder="Search projects..."
+                          />
+                        </div>
+                      </div>
+                    )}
                     <div className="tw-max-h-[calc(3*5.7rem)] tw-overflow-y-auto tw-px-4 tw-pb-6 tw-pt-3">
                       <div className="tw-flex tw-flex-col tw-gap-2 @2xl:tw-grid @2xl:tw-grid-cols-2 @4xl:tw-grid-cols-3">
-                        {projects.map((project) => (
+                        {filteredProjects.map((project) => (
                           <ProjectItem
                             key={project.name}
                             project={project}
@@ -354,6 +375,16 @@ export const ProjectList = memo(
                           />
                         ))}
                       </div>
+                      {/* No search results message */}
+                      {searchQuery.trim() && filteredProjects.length === 0 && (
+                        <div className="tw-flex tw-flex-col tw-items-center tw-justify-center tw-py-8 tw-text-muted">
+                          <Search className="tw-mb-3 tw-size-12 tw-text-muted/50" />
+                          <p className="tw-text-base tw-font-medium">No matching projects found</p>
+                          <p className="tw-mt-1 tw-text-sm">
+                            Try searching with different keywords
+                          </p>
+                        </div>
+                      )}
                     </div>
                     {projects.length > 0 && (
                       <div className="tw-pointer-events-none tw-absolute tw-inset-x-0 tw-bottom-0 tw-h-8 tw-bg-[linear-gradient(to_top,var(--background-primary)_0%,var(--background-primary)_30%,transparent_100%)]" />

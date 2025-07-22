@@ -284,15 +284,6 @@ export const BasicSettings: React.FC = () => {
 
           <SettingItem
             type="text"
-            title="Custom Prompts Folder Name"
-            description="The default folder name where custom prompts will be saved. Default is 'copilot-custom-prompts'"
-            value={settings.customPromptsFolder}
-            onChange={(value) => updateSetting("customPromptsFolder", value)}
-            placeholder="copilot-custom-prompts"
-          />
-
-          <SettingItem
-            type="text"
             title="Default Conversation Tag"
             description="The default tag to be used when saving a conversation. Default is 'ai-conversations'"
             value={settings.defaultConversationTag}
@@ -377,7 +368,7 @@ export const BasicSettings: React.FC = () => {
           <SettingItem
             type="switch"
             title="Autosave Chat"
-            description="Automatically save the chat when starting a new one or when the plugin reloads"
+            description="Automatically saves the chat after every user message and AI response."
             checked={settings.autosaveChat}
             onCheckedChange={(checked) => updateSetting("autosaveChat", checked)}
           />

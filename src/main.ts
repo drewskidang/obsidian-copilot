@@ -2,14 +2,14 @@ import { BrevilabsClient } from "@/LLMProviders/brevilabsClient";
 import ProjectManager from "@/LLMProviders/projectManager";
 import { CustomModel, getCurrentProject } from "@/aiParams";
 import { AutocompleteService } from "@/autocomplete/autocompleteService";
-import { parseChatContent, updateChatMemory } from "@/chatUtils";
+import { parseChatContent } from "@/chatUtils";
 import { registerCommands } from "@/commands";
 import CopilotView from "@/components/CopilotView";
 import { APPLY_VIEW_TYPE, ApplyView } from "@/components/composer/ApplyView";
 import { LoadChatHistoryModal } from "@/components/modals/LoadChatHistoryModal";
 
-import { CHAT_VIEWTYPE, DEFAULT_OPEN_AREA, EVENT_NAMES } from "@/constants";
-import { registerContextMenu } from "@/contextMenu";
+import { ABORT_REASON, CHAT_VIEWTYPE, DEFAULT_OPEN_AREA, EVENT_NAMES } from "@/constants";
+import { registerContextMenu } from "@/commands/contextMenu";
 import { encryptAllKeys } from "@/encryptionService";
 import { logInfo } from "@/logger";
 import { checkIsPlusUser } from "@/plusUtils";
@@ -23,7 +23,6 @@ import {
   setSettings,
   subscribeToSettingsChange,
 } from "@/settings/model";
-import SharedState from "@/sharedState";
 import { FileParserManager } from "@/tools/FileParserManager";
 import {
   Editor,
@@ -36,18 +35,23 @@ import {
   WorkspaceLeaf,
 } from "obsidian";
 import { IntentAnalyzer } from "./LLMProviders/intentAnalyzer";
+import { CustomCommandRegister } from "@/commands/customCommandRegister";
+import { migrateCommands, suggestDefaultCommands } from "@/commands/migrator";
+import { ChatManager } from "@/core/ChatManager";
+import { MessageRepository } from "@/core/MessageRepository";
+import { ChatUIState } from "@/state/ChatUIState";
 
 export default class CopilotPlugin extends Plugin {
-  // A chat history that stores the messages sent and received
-  // Only reset when the user explicitly clicks "New Chat"
-  sharedState: SharedState;
+  // Plugin components
   projectManager: ProjectManager;
   brevilabsClient: BrevilabsClient;
   userMessageHistory: string[] = [];
   vectorStoreManager: VectorStoreManager;
   fileParserManager: FileParserManager;
+  customCommandRegister: CustomCommandRegister;
   settingsUnsubscriber?: () => void;
   private autocompleteService: AutocompleteService;
+  chatUIState: ChatUIState;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -61,8 +65,7 @@ export default class CopilotPlugin extends Plugin {
     });
     this.addSettingTab(new CopilotSettingTab(this.app, this));
 
-    // Always have one instance of sharedState in the plugin
-    this.sharedState = new SharedState(this);
+    // Core plugin initialization
 
     this.vectorStoreManager = VectorStoreManager.getInstance();
 
@@ -76,6 +79,12 @@ export default class CopilotPlugin extends Plugin {
 
     // Initialize FileParserManager early with other core services
     this.fileParserManager = new FileParserManager(this.brevilabsClient, this.app.vault);
+
+    // Initialize ChatUIState with new architecture
+    const messageRepo = new MessageRepository();
+    const chainManager = this.projectManager.getCurrentChainManager();
+    const chatManager = new ChatManager(messageRepo, chainManager, this.fileParserManager, this);
+    this.chatUIState = new ChatUIState(chatManager);
 
     this.registerView(CHAT_VIEWTYPE, (leaf: WorkspaceLeaf) => new CopilotView(leaf, this));
     this.registerView(APPLY_VIEW_TYPE, (leaf: WorkspaceLeaf) => new ApplyView(leaf));
@@ -91,11 +100,8 @@ export default class CopilotPlugin extends Plugin {
     IntentAnalyzer.initTools(this.app.vault);
 
     this.registerEvent(
-      this.app.workspace.on("editor-menu", (menu: Menu, editor: Editor) => {
-        const selectedText = editor.getSelection().trim();
-        if (selectedText) {
-          this.handleContextMenu(menu, editor);
-        }
+      this.app.workspace.on("editor-menu", (menu: Menu) => {
+        return registerContextMenu(menu);
       })
     );
 
@@ -119,10 +125,13 @@ export default class CopilotPlugin extends Plugin {
 
     // Initialize autocomplete service
     this.autocompleteService = AutocompleteService.getInstance(this);
+    this.customCommandRegister = new CustomCommandRegister(this, this.app.vault);
+    this.app.workspace.onLayoutReady(() => {
+      this.customCommandRegister.initialize().then(migrateCommands).then(suggestDefaultCommands);
+    });
   }
 
   async onunload() {
-    // Clean up VectorStoreManager
     if (this.vectorStoreManager) {
       this.vectorStoreManager.onunload();
     }
@@ -131,6 +140,7 @@ export default class CopilotPlugin extends Plugin {
       this.projectManager.onunload();
     }
 
+    this.customCommandRegister.cleanup();
     this.settingsUnsubscriber?.();
     this.autocompleteService?.destroy();
 
@@ -144,7 +154,7 @@ export default class CopilotPlugin extends Plugin {
   async autosaveCurrentChat() {
     if (getSettings().autosaveChat) {
       const chatView = this.app.workspace.getLeavesOfType(CHAT_VIEWTYPE)[0]?.view as CopilotView;
-      if (chatView && chatView.sharedState.chatHistory.length > 0) {
+      if (chatView) {
         await chatView.saveChat();
       }
     }
@@ -288,10 +298,6 @@ export default class CopilotPlugin extends Plugin {
     return Array.from(modelMap.values());
   }
 
-  handleContextMenu = (menu: Menu, editor: Editor): void => {
-    registerContextMenu(menu, editor, this);
-  };
-
   async loadCopilotChatHistory() {
     const chatFiles = await this.getChatHistoryFiles();
     if (chatFiles.length === 0) {
@@ -329,22 +335,26 @@ export default class CopilotPlugin extends Plugin {
   }
 
   async loadChatHistory(file: TFile) {
+    // First autosave the current chat if the setting is enabled
+    await this.autosaveCurrentChat();
+
     const content = await this.app.vault.read(file);
     const messages = parseChatContent(content);
-    this.sharedState.clearChatHistory();
-    messages.forEach((message) => this.sharedState.addMessage(message));
-
-    // Update the chain's memory with the loaded messages
-    await updateChatMemory(messages, this.projectManager.getCurrentChainManager().memoryManager);
 
     // Check if the Copilot view is already active
     const existingView = this.app.workspace.getLeavesOfType(CHAT_VIEWTYPE)[0];
     if (!existingView) {
       // Only activate the view if it's not already open
       this.activateView();
-    } else {
-      // If the view is already open, just update its content
-      const copilotView = existingView.view as CopilotView;
+    }
+
+    // Load messages into ChatUIState (which now handles memory updates)
+    await this.chatUIState.loadMessages(messages);
+
+    // Update the view
+    const copilotView = (existingView || this.app.workspace.getLeavesOfType(CHAT_VIEWTYPE)[0])
+      ?.view as CopilotView;
+    if (copilotView) {
       copilotView.updateView();
     }
   }
@@ -353,14 +363,21 @@ export default class CopilotPlugin extends Plugin {
     // First autosave the current chat if the setting is enabled
     await this.autosaveCurrentChat();
 
-    // Clear chat history
-    this.sharedState.clearChatHistory();
+    // Abort any ongoing streams before clearing chat
+    const existingView = this.app.workspace.getLeavesOfType(CHAT_VIEWTYPE)[0];
+    if (existingView) {
+      const copilotView = existingView.view as CopilotView;
+      // Dispatch abort event to stop any ongoing streams
+      const abortEvent = new CustomEvent(EVENT_NAMES.ABORT_STREAM, {
+        detail: { reason: ABORT_REASON.NEW_CHAT },
+      });
+      copilotView.eventTarget.dispatchEvent(abortEvent);
+    }
 
-    // Clear chain memory
-    this.projectManager.getCurrentChainManager().memoryManager.clearChatMemory();
+    // Clear messages through ChatUIState (which also clears chain memory)
+    this.chatUIState.clearMessages();
 
     // Update view if it exists
-    const existingView = this.app.workspace.getLeavesOfType(CHAT_VIEWTYPE)[0];
     if (existingView) {
       const copilotView = existingView.view as CopilotView;
       copilotView.updateView();

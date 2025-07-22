@@ -1,17 +1,8 @@
-import React from "react";
-import { InlineEditCommandSettings, updateSetting } from "@/settings/model";
+import React, { useMemo } from "react";
 import { Button } from "@/components/ui/button";
-import { InlineEditCommandSettingsModal } from "@/components/modals/InlineEditCommandSettingsModal";
-import { hasModifiedCommand, useInlineEditCommands } from "@/commands/inlineEditCommandUtils";
-import {
-  Lightbulb,
-  PencilLine,
-  Plus,
-  GripVertical,
-  Copy,
-  MoreVertical,
-  Trash2,
-} from "lucide-react";
+import { useCustomCommands } from "@/commands/state";
+import { Lightbulb, GripVertical, Trash2, Plus, Info, PenLine, Copy } from "lucide-react";
+
 import {
   Table,
   TableBody,
@@ -31,7 +22,6 @@ import {
   DragEndEvent,
 } from "@dnd-kit/core";
 import {
-  arrayMove,
   SortableContext,
   sortableKeyboardCoordinates,
   useSortable,
@@ -39,22 +29,34 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { cn } from "@/lib/utils";
+import { useSettingsValue } from "@/settings/model";
+import { updateSetting } from "@/settings/model";
+import { PromptSortStrategy } from "@/types";
+
+import { Notice } from "obsidian";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { CustomCommand } from "@/commands/type";
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
-import { useContainerContext } from "@/settings/v2/components/ContainerContext";
+  loadAllCustomCommands,
+  sortCommandsByOrder,
+  generateCopyCommandName,
+} from "@/commands/customCommandUtils";
+import { CustomCommandSettingsModal } from "@/commands/CustomCommandSettingsModal";
+import { SettingItem } from "@/components/ui/setting-item";
+import { CustomCommandManager } from "@/commands/customCommandManager";
+import { ConfirmModal } from "@/components/modals/ConfirmModal";
+import { generateDefaultCommands } from "@/commands/migrator";
+import { EMPTY_COMMAND } from "@/commands/constants";
 
 const SortableTableRow: React.FC<{
-  command: InlineEditCommandSettings;
-  onUpdate: (prevCommand: InlineEditCommandSettings, newCommand: InlineEditCommandSettings) => void;
-  onRemove: (command: InlineEditCommandSettings) => void;
-  onDuplicate: (command: InlineEditCommandSettings) => void;
-}> = ({ command, onUpdate, onRemove, onDuplicate }) => {
+  command: CustomCommand;
+  commands: CustomCommand[];
+  onUpdate: (newCommand: CustomCommand, prevCommandTitle: string) => void;
+  onRemove: (command: CustomCommand) => void;
+  onCopy: (command: CustomCommand) => void;
+}> = ({ command, commands, onUpdate, onRemove, onCopy }) => {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
-    id: command.name,
+    id: command.title,
   });
 
   const style = {
@@ -62,7 +64,9 @@ const SortableTableRow: React.FC<{
     transition,
   };
 
-  const container = useContainerContext();
+  const handleDelete = () => {
+    onRemove(command);
+  };
 
   return (
     <TableRow
@@ -83,15 +87,33 @@ const SortableTableRow: React.FC<{
           <GripVertical className="tw-size-4" />
         </div>
       </TableCell>
-      <TableCell>{command.name}</TableCell>
+      <TableCell>{command.title}</TableCell>
       <TableCell className="tw-text-center">
         <Checkbox
           checked={command.showInContextMenu}
+          onCheckedChange={(checked) => {
+            onUpdate(
+              {
+                ...command,
+                showInContextMenu: checked === true,
+              },
+              command.title
+            );
+          }}
+          className="tw-mx-auto"
+        />
+      </TableCell>
+      <TableCell className="tw-text-center">
+        <Checkbox
+          checked={command.showInSlashMenu}
           onCheckedChange={(checked) =>
-            onUpdate(command, {
-              ...command,
-              showInContextMenu: checked === true,
-            })
+            onUpdate(
+              {
+                ...command,
+                showInSlashMenu: checked === true,
+              },
+              command.title
+            )
           }
           className="tw-mx-auto"
         />
@@ -101,47 +123,39 @@ const SortableTableRow: React.FC<{
           <Button
             variant="ghost"
             size="icon"
-            onClick={() =>
-              new InlineEditCommandSettingsModal(
+            onClick={() => {
+              const modal = new CustomCommandSettingsModal(
                 app,
+                commands,
                 command,
-                (newCommand) => onUpdate(command, newCommand),
-                () => onRemove(command)
-              ).open()
-            }
-          >
-            <PencilLine className="tw-size-4" />
-          </Button>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon">
-                <MoreVertical className="tw-size-4" />
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" container={container}>
-              <DropdownMenuItem
-                onClick={() =>
-                  new InlineEditCommandSettingsModal(
-                    app,
-                    command,
-                    (newCommand) => onUpdate(command, newCommand),
-                    () => onRemove(command)
-                  ).open()
+                async (updatedCommand) => {
+                  await onUpdate(updatedCommand, command.title);
                 }
-              >
-                <PencilLine className="tw-mr-2 tw-size-4" />
-                Edit
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onDuplicate(command)}>
-                <Copy className="tw-mr-2 tw-size-4" />
-                Copy
-              </DropdownMenuItem>
-              <DropdownMenuItem onClick={() => onRemove(command)} className="tw-text-error">
-                <Trash2 className="tw-mr-2 tw-size-4" />
-                Delete
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
+              );
+              modal.open();
+            }}
+          >
+            <PenLine className="tw-size-4" />
+          </Button>
+          <Button variant="ghost" size="icon" onClick={() => onCopy(command)} title="Copy command">
+            <Copy className="tw-size-4" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={() => {
+              new ConfirmModal(
+                app,
+                handleDelete,
+                `Are you sure you want to delete the command "${command.title}"? This will permanently remove the command file and cannot be undone.`,
+                "Delete Command",
+                "Delete",
+                "Cancel"
+              ).open();
+            }}
+          >
+            <Trash2 className="tw-size-4" />
+          </Button>
         </div>
       </TableCell>
     </TableRow>
@@ -149,7 +163,12 @@ const SortableTableRow: React.FC<{
 };
 
 export const CommandSettings: React.FC = () => {
-  const commands = useInlineEditCommands();
+  const rawCommands = useCustomCommands();
+  const commands = useMemo(() => {
+    return sortCommandsByOrder([...rawCommands]);
+  }, [rawCommands]);
+
+  const settings = useSettingsValue();
   const sensors = useSensors(
     useSensor(PointerSensor, {
       activationConstraint: {
@@ -161,56 +180,65 @@ export const CommandSettings: React.FC = () => {
     })
   );
 
-  const handleUpdate = (
-    prevCommand: InlineEditCommandSettings,
-    newCommand: InlineEditCommandSettings
-  ) => {
-    const index = commands.findIndex((c) => c === prevCommand);
-    if (index === -1) {
-      updateSetting("inlineEditCommands", [...commands, newCommand]);
-    } else {
-      updateSetting("inlineEditCommands", [
-        ...commands.slice(0, index),
-        newCommand,
-        ...commands.slice(index + 1),
-      ]);
+  const handleUpdate = async (newCommand: CustomCommand, prevCommandTitle: string) => {
+    await CustomCommandManager.getInstance().updateCommand(newCommand, prevCommandTitle);
+  };
+
+  const handleCreate = async (newCommand: CustomCommand) => {
+    await CustomCommandManager.getInstance().createCommand(newCommand);
+  };
+
+  const handleRemove = async (command: CustomCommand) => {
+    try {
+      await CustomCommandManager.getInstance().deleteCommand(command);
+
+      new Notice(`Command "${command.title}" deleted successfully!`);
+    } catch (error) {
+      console.error("Failed to delete command:", error);
+      new Notice("Failed to delete command. Please try again.");
+      throw error;
     }
   };
 
-  const handleDuplicate = (command: InlineEditCommandSettings) => {
-    const duplicatedCommand = {
-      ...command,
-      name: `${command.name} (copy)`,
-    };
-    const index = commands.findIndex((c) => c === command);
-    if (index !== -1) {
-      updateSetting("inlineEditCommands", [
-        ...commands.slice(0, index + 1),
-        duplicatedCommand,
-        ...commands.slice(index + 1),
-      ]);
+  const handleCopy = async (command: CustomCommand) => {
+    try {
+      const copyName = generateCopyCommandName(command.title, commands);
+      const copiedCommand: CustomCommand = {
+        ...command,
+        title: copyName,
+      };
+      await CustomCommandManager.getInstance().createCommand(copiedCommand, {
+        // Explicitly make the new command the same order as the original command
+        // so it appears next to the original command in the menu. The extra
+        // suffix will ensure it is below the original command in the menu.
+        autoOrder: false,
+      });
+    } catch (error) {
+      console.error("Failed to copy command:", error);
+      new Notice("Failed to copy command. Please try again.");
     }
   };
 
-  const handleRemove = (command: InlineEditCommandSettings) => {
-    updateSetting(
-      "inlineEditCommands",
-      commands.filter((c) => c !== command)
-    );
-  };
-
-  const handleDragEnd = (event: DragEndEvent) => {
+  const handleDragEnd = async (event: DragEndEvent) => {
     const { active, over } = event;
 
-    if (over && active.id !== over.id) {
-      const oldIndex = commands.findIndex((command) => command.name === active.id);
-      const newIndex = commands.findIndex((command) => command.name === over.id);
-
-      if (oldIndex !== -1 && newIndex !== -1) {
-        const newCommands = arrayMove(commands, oldIndex, newIndex);
-        updateSetting("inlineEditCommands", newCommands);
-      }
+    if (!over || active.id === over.id) {
+      return;
     }
+
+    const activeIndex = commands.findIndex((command) => command.title === active.id);
+    const overIndex = commands.findIndex((command) => command.title === over.id);
+
+    if (activeIndex === -1 || overIndex === -1) {
+      return;
+    }
+
+    // Create new order
+    const newCommands = [...commands];
+    const [movedCommand] = newCommands.splice(activeIndex, 1);
+    newCommands.splice(overIndex, 0, movedCommand);
+
+    await CustomCommandManager.getInstance().reorderCommands(newCommands);
   };
 
   return (
@@ -219,18 +247,93 @@ export const CommandSettings: React.FC = () => {
         <div className="tw-mb-4 tw-flex tw-flex-col tw-gap-2">
           <div className="tw-text-xl tw-font-bold">Custom Commands</div>
           <div className="tw-text-sm tw-text-muted">
-            To trigger a custom command, highlight text in the editor and select it from the command
-            palette, or right-click and choose it from the context menu if configured.
+            Custom commands are preset prompts that you can trigger in the editor by right-clicking
+            and selecting them from the context menu or by using a <code>/</code> command in the
+            chat to load them into your chat input.
           </div>
         </div>
-        {!hasModifiedCommand() && (
-          <div className="tw-flex tw-items-start tw-gap-2 tw-rounded-md tw-border tw-border-solid tw-border-border tw-p-4 tw-text-muted">
-            <Lightbulb className="tw-size-5" /> Take control of your inline edit commands! You can
-            now create your own or edit built-in ones to tailor functionality to your needs.
+
+        <SettingItem
+          type="text"
+          title="Custom Prompts Folder Name"
+          description="Folder where custom prompts are stored"
+          value={settings.customPromptsFolder}
+          onChange={(value) => {
+            updateSetting("customPromptsFolder", value);
+            loadAllCustomCommands();
+          }}
+          placeholder="copilot-custom-prompts"
+        />
+        <SettingItem
+          type="switch"
+          title="Custom Prompt Templating"
+          description="Process variables like {activenote}, {foldername}, or {#tag} in prompts. Disable for raw prompts."
+          checked={settings.enableCustomPromptTemplating}
+          onCheckedChange={(checked) => {
+            updateSetting("enableCustomPromptTemplating", checked);
+          }}
+        />
+        <SettingItem
+          type="select"
+          title="Custom Prompts Sort Strategy"
+          description="Sort order for slash command menu prompts"
+          value={settings.promptSortStrategy}
+          onChange={(value) => updateSetting("promptSortStrategy", value)}
+          options={[
+            { label: "Recency", value: PromptSortStrategy.TIMESTAMP },
+            { label: "Alphabetical", value: PromptSortStrategy.ALPHABETICAL },
+            { label: "Manual", value: PromptSortStrategy.MANUAL },
+          ]}
+        />
+
+        <div className="tw-mb-4 tw-flex tw-items-start tw-gap-2 tw-rounded-md tw-border tw-border-solid tw-border-border tw-p-4 tw-text-muted">
+          <Lightbulb className="tw-size-5" />{" "}
+          <div>
+            Commands are automatically loaded from .md files in your custom prompts folder{" "}
+            <strong>{settings.customPromptsFolder}</strong>. Modifying the files will also update
+            the command settings.
           </div>
-        )}
+        </div>
 
         <div className="tw-flex tw-flex-col tw-gap-4">
+          <div className="tw-flex tw-w-full tw-justify-between">
+            <div>
+              <Button
+                variant="secondary"
+                onClick={() =>
+                  new ConfirmModal(
+                    app,
+                    generateDefaultCommands,
+                    "This will add default commands to your custom prompts folder. Do you want to continue?",
+                    "Generate Default Commands"
+                  ).open()
+                }
+              >
+                Generate Default Commands
+              </Button>
+            </div>
+            <Button
+              variant="default"
+              className="tw-gap-2"
+              onClick={() => {
+                const newCommand: CustomCommand = {
+                  ...EMPTY_COMMAND,
+                };
+                const modal = new CustomCommandSettingsModal(
+                  app,
+                  commands,
+                  newCommand,
+                  async (updatedCommand) => {
+                    await handleCreate(updatedCommand);
+                  }
+                );
+                modal.open();
+              }}
+            >
+              <Plus className="tw-size-4" />
+              Add Command
+            </Button>
+          </div>
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
@@ -241,46 +344,68 @@ export const CommandSettings: React.FC = () => {
                 <TableRow>
                   <TableHead className="tw-w-10"></TableHead>
                   <TableHead>Name</TableHead>
-                  <TableHead className="tw-w-20 tw-text-center">In Menu</TableHead>
-                  <TableHead className="tw-w-10"></TableHead>
+                  <TableHead className="tw-w-24 tw-text-center">
+                    <div className="tw-flex tw-items-center tw-justify-center tw-gap-1">
+                      In Menu
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Info className="tw-size-4" />
+                          </TooltipTrigger>
+                          <TooltipContent className="tw-max-w-xs tw-text-xs">
+                            If enabled, the command will be available in the context menu when you
+                            right-click in the editor.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  </TableHead>
+                  <TableHead className="tw-w-28 tw-text-center">
+                    <div className="tw-flex tw-items-center tw-justify-center tw-gap-1">
+                      Slash Cmd
+                      <TooltipProvider>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Info className="tw-size-4" />
+                          </TooltipTrigger>
+                          <TooltipContent className="tw-max-w-xs tw-text-xs">
+                            If enabled, the command will be available as a slash command in the
+                            chat.
+                          </TooltipContent>
+                        </Tooltip>
+                      </TooltipProvider>
+                    </div>
+                  </TableHead>
+                  <TableHead className="tw-w-32 tw-text-center">Actions</TableHead>
                 </TableRow>
               </TableHeader>
               <SortableContext
-                items={commands.map((command) => command.name)}
+                items={commands.map((command) => command.title)}
                 strategy={verticalListSortingStrategy}
               >
                 <TableBody>
-                  {commands.map((command) => (
-                    <SortableTableRow
-                      key={command.name}
-                      command={command}
-                      onUpdate={handleUpdate}
-                      onRemove={handleRemove}
-                      onDuplicate={handleDuplicate}
-                    />
-                  ))}
+                  {commands.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={5} className="tw-py-8 tw-text-center tw-text-muted">
+                        No custom prompt files found.
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    commands.map((command) => (
+                      <SortableTableRow
+                        key={command.title}
+                        command={command}
+                        commands={commands}
+                        onUpdate={handleUpdate}
+                        onRemove={handleRemove}
+                        onCopy={handleCopy}
+                      />
+                    ))
+                  )}
                 </TableBody>
               </SortableContext>
             </Table>
           </DndContext>
-          <div className="tw-flex tw-w-full tw-justify-end">
-            <Button
-              variant="secondary"
-              onClick={() =>
-                new InlineEditCommandSettingsModal(
-                  app,
-                  {
-                    name: "",
-                    prompt: "",
-                    showInContextMenu: false,
-                  },
-                  (command) => handleUpdate(command, command)
-                ).open()
-              }
-            >
-              <Plus className="tw-size-4" /> Add Command
-            </Button>
-          </div>
         </div>
       </section>
     </div>

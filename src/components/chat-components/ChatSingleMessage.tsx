@@ -4,7 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { USER_SENDER } from "@/constants";
 import { cn } from "@/lib/utils";
-import { ChatMessage } from "@/sharedState";
+import { ChatMessage } from "@/types/message";
 import { insertIntoEditor } from "@/utils";
 import { Bot, User } from "lucide-react";
 import { App, Component, MarkdownRenderer, MarkdownView, TFile } from "obsidian";
@@ -14,14 +14,14 @@ import { createRoot, Root } from "react-dom/client";
 import { ComposerCodeBlock } from "./ComposerCodeBlock";
 
 function MessageContext({ context }: { context: ChatMessage["context"] }) {
-  if (!context || (context.notes.length === 0 && context.urls.length === 0)) {
+  if (!context || (!context.notes?.length && !context.urls?.length)) {
     return null;
   }
 
   return (
     <div className="tw-flex tw-flex-wrap tw-gap-2">
-      {context.notes.map((note) => (
-        <Tooltip key={note.path}>
+      {context.notes.map((note, index) => (
+        <Tooltip key={`${index}-${note.path}`}>
           <TooltipTrigger asChild>
             <Badge variant="secondary">
               <span className="tw-max-w-40 tw-truncate">{note.basename}</span>
@@ -30,8 +30,8 @@ function MessageContext({ context }: { context: ChatMessage["context"] }) {
           <TooltipContent>{note.path}</TooltipContent>
         </Tooltip>
       ))}
-      {context.urls.map((url) => (
-        <Tooltip key={url}>
+      {context.urls.map((url, index) => (
+        <Tooltip key={`${index}-${url}`}>
           <TooltipTrigger asChild>
             <Badge variant="secondary">
               <span className="tw-max-w-40 tw-truncate">{url}</span>
@@ -279,10 +279,16 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
                   if (
                     composerData.type === "composer" &&
                     composerData.path &&
-                    (composerData.content || composerData.canvas_json)
+                    // `content` and `canvas_json` should never exist together
+                    (typeof composerData.content === "string" ||
+                      typeof composerData.canvas_json === "object")
                   ) {
-                    let newContent =
-                      composerData.content || JSON.stringify(composerData.canvas_json);
+                    let newContent;
+                    if (typeof composerData.content === "string") {
+                      newContent = composerData.content;
+                    } else {
+                      newContent = JSON.stringify(composerData.canvas_json);
+                    }
                     let path = composerData.path.trim();
                     // If path starts with a /, remove it
                     if (path.startsWith("/")) {
@@ -387,7 +393,15 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
     if (event.key === "Enter" && !event.shiftKey) {
       event.preventDefault(); // Prevents adding a newline to the textarea
       handleSaveEdit();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      handleCancelEdit();
     }
+  };
+
+  const handleCancelEdit = () => {
+    setIsEditing(false);
+    setEditedMessage(message.message);
   };
 
   const handleEdit = () => {
@@ -433,7 +447,6 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
                       value={editedMessage}
                       onChange={handleTextareaChange}
                       onKeyDown={handleKeyDown}
-                      onBlur={handleSaveEdit}
                       autoFocus
                       className="edit-textarea"
                     />
@@ -473,7 +486,6 @@ const ChatSingleMessage: React.FC<ChatSingleMessageProps> = ({
         value={editedMessage}
         onChange={handleTextareaChange}
         onKeyDown={handleKeyDown}
-        onBlur={handleSaveEdit}
         autoFocus
         className="edit-textarea"
       />

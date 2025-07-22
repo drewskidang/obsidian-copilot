@@ -94,7 +94,8 @@ export default class ChatModelManager {
 
     const modelName = customModel.name;
     const isOSeries = isOSeriesModel(modelName);
-    const isThinkingEnabled = modelName.startsWith("claude-3-7-sonnet");
+    const isThinkingEnabled =
+      modelName.startsWith("claude-3-7-sonnet") || modelName.startsWith("claude-sonnet-4");
 
     // Base config without temperature when thinking is enabled
     const baseConfig: Omit<ModelConfig, "maxTokens" | "maxCompletionTokens" | "temperature"> = {
@@ -121,7 +122,11 @@ export default class ChatModelManager {
           fetch: customModel.enableCors ? safeFetch : undefined,
           organization: await getDecryptedKey(customModel.openAIOrgId || settings.openAIOrgId),
         },
-        ...this.handleOpenAIExtraArgs(isOSeries, settings.maxTokens, settings.temperature),
+        ...this.handleOpenAIExtraArgs(
+          isOSeries,
+          customModel.maxTokens ?? settings.maxTokens,
+          customModel.temperature ?? settings.temperature
+        ),
       },
       [ChatModelProviders.ANTHROPIC]: {
         anthropicApiKey: await getDecryptedKey(customModel.apiKey || settings.anthropicApiKey),
@@ -155,7 +160,11 @@ export default class ChatModelManager {
           },
           fetch: customModel.enableCors ? safeFetch : undefined,
         },
-        ...this.handleOpenAIExtraArgs(isOSeries, settings.maxTokens, settings.temperature),
+        ...this.handleOpenAIExtraArgs(
+          isOSeries,
+          customModel.maxTokens ?? settings.maxTokens,
+          customModel.temperature ?? settings.temperature
+        ),
       },
       [ChatModelProviders.COHEREAI]: {
         apiKey: await getDecryptedKey(customModel.apiKey || settings.cohereApiKey),
@@ -195,6 +204,10 @@ export default class ChatModelManager {
         configuration: {
           baseURL: customModel.baseUrl || "https://openrouter.ai/api/v1",
           fetch: customModel.enableCors ? safeFetch : undefined,
+          defaultHeaders: {
+            "HTTP-Referer": "https://obsidiancopilot.com",
+            "X-Title": "Obsidian Copilot",
+          },
         },
       },
       [ChatModelProviders.GROQ]: {
@@ -226,7 +239,11 @@ export default class ChatModelManager {
           fetch: customModel.enableCors ? safeFetch : undefined,
           defaultHeaders: { "dangerously-allow-browser": "true" },
         },
-        ...this.handleOpenAIExtraArgs(isOSeries, settings.maxTokens, settings.temperature),
+        ...this.handleOpenAIExtraArgs(
+          isOSeries,
+          customModel.maxTokens ?? settings.maxTokens,
+          customModel.temperature ?? settings.temperature
+        ),
       },
       [ChatModelProviders.COPILOT_PLUS]: {
         modelName: modelName,
@@ -254,7 +271,12 @@ export default class ChatModelManager {
     const selectedProviderConfig =
       providerConfig[customModel.provider as keyof typeof providerConfig] || {};
 
-    // Add token configuration separately to ensure they don't conflict
+    // Get provider-specific parameters (like topP, frequencyPenalty) that the provider supports
+    const providerSpecificParams = this.getProviderSpecificParams(
+      customModel.provider as ChatModelProviders,
+      customModel
+    );
+
     const tokenConfig = isThinkingEnabled
       ? {
           maxTokens: customModel.maxTokens ?? settings.maxTokens,
@@ -268,6 +290,7 @@ export default class ChatModelManager {
     const finalConfig = {
       ...baseConfig,
       ...selectedProviderConfig,
+      ...providerSpecificParams,
       ...tokenConfig,
     };
 
@@ -294,6 +317,56 @@ export default class ChatModelManager {
           temperature: temperature,
         };
     return config;
+  }
+
+  /**
+   * Returns provider-specific parameters (like topP, frequencyPenalty) based on what the provider supports
+   * This prevents passing undefined values to providers that don't support them
+   */
+  private getProviderSpecificParams(provider: ChatModelProviders, customModel: CustomModel) {
+    const params: Record<string, any> = {};
+
+    // Add topP only if defined
+    if (customModel.topP !== undefined) {
+      // These providers support topP
+      if (
+        [
+          ChatModelProviders.OPENAI,
+          ChatModelProviders.AZURE_OPENAI,
+          ChatModelProviders.ANTHROPIC,
+          ChatModelProviders.GOOGLE,
+          ChatModelProviders.OPENROUTERAI,
+          ChatModelProviders.OLLAMA,
+          ChatModelProviders.LM_STUDIO,
+          ChatModelProviders.OPENAI_FORMAT,
+          ChatModelProviders.MISTRAL,
+          ChatModelProviders.DEEPSEEK,
+        ].includes(provider)
+      ) {
+        params.topP = customModel.topP;
+      }
+    }
+
+    // Add frequencyPenalty only if defined
+    if (customModel.frequencyPenalty !== undefined) {
+      // These providers support frequencyPenalty
+      if (
+        [
+          ChatModelProviders.OPENAI,
+          ChatModelProviders.AZURE_OPENAI,
+          ChatModelProviders.OPENROUTERAI,
+          ChatModelProviders.OLLAMA,
+          ChatModelProviders.LM_STUDIO,
+          ChatModelProviders.OPENAI_FORMAT,
+          ChatModelProviders.MISTRAL,
+          ChatModelProviders.DEEPSEEK,
+        ].includes(provider)
+      ) {
+        params.frequencyPenalty = customModel.frequencyPenalty;
+      }
+    }
+
+    return params;
   }
 
   // Build a map of modelKey to model config
@@ -432,13 +505,13 @@ export default class ChatModelManager {
       // eslint-disable-next-line @typescript-eslint/no-unused-vars
       const { streaming, maxTokens, maxCompletionTokens, ...pingConfig } = modelConfig;
       const isOSeries = isOSeriesModel(modelToTest.name);
-      const tokenConfig = this.handleOpenAIExtraArgs(isOSeries, 10, modelConfig.temperature);
+      const tokenConfig = this.handleOpenAIExtraArgs(isOSeries, 30, modelConfig.temperature);
       const testModel = new (this.getProviderConstructor(modelToTest))({
         ...pingConfig,
         ...tokenConfig,
       });
       await testModel.invoke([{ role: "user", content: "hello" }], {
-        timeout: 3000,
+        timeout: 8000,
       });
     };
 

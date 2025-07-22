@@ -1,12 +1,15 @@
 import {
+  clearSelectedTextContexts,
   getCurrentProject,
   ProjectConfig,
+  removeSelectedTextContext,
   setCurrentProject,
   useChainType,
   useModelKey,
+  useSelectedTextContexts,
 } from "@/aiParams";
 import { ChainType } from "@/chainFactory";
-import { updateChatMemory } from "@/chatUtils";
+import { processPrompt } from "@/commands/customCommandUtils";
 import { ChatControls, reloadCurrentProject } from "@/components/chat-components/ChatControls";
 import ChatInput from "@/components/chat-components/ChatInput";
 import ChatMessages from "@/components/chat-components/ChatMessages";
@@ -14,17 +17,21 @@ import { NewVersionBanner } from "@/components/chat-components/NewVersionBanner"
 import { ProjectList } from "@/components/chat-components/ProjectList";
 import { ABORT_REASON, COMMAND_IDS, EVENT_NAMES, LOADING_MESSAGES, USER_SENDER } from "@/constants";
 import { AppContext, EventTargetContext } from "@/context";
-import { ContextProcessor } from "@/contextProcessor";
-import { CustomPromptProcessor } from "@/customPromptProcessor";
+import { useChatManager } from "@/hooks/useChatManager";
 import { getAIResponse } from "@/langchainStream";
 import ChainManager from "@/LLMProviders/chainManager";
 import CopilotPlugin from "@/main";
 import { Mention } from "@/mentions/Mention";
 import { useIsPlusUser } from "@/plusUtils";
-import { getSettings, updateSetting, useSettingsValue } from "@/settings/model";
-import SharedState, { ChatMessage, useSharedState } from "@/sharedState";
+import {
+  getComposerOutputPrompt,
+  getSettings,
+  updateSetting,
+  useSettingsValue,
+} from "@/settings/model";
+import { ChatUIState } from "@/state/ChatUIState";
 import { FileParserManager } from "@/tools/FileParserManager";
-import { err2String, formatDateTime } from "@/utils";
+import { err2String } from "@/utils";
 import { Buffer } from "buffer";
 import { Notice, TFile } from "obsidian";
 import React, { useCallback, useContext, useEffect, useRef, useState } from "react";
@@ -32,26 +39,27 @@ import React, { useCallback, useContext, useEffect, useRef, useState } from "rea
 type ChatMode = "default" | "project";
 
 interface ChatProps {
-  sharedState: SharedState;
   chainManager: ChainManager;
   onSaveChat: (saveAsNote: () => Promise<void>) => void;
   updateUserMessageHistory: (newMessage: string) => void;
   fileParserManager: FileParserManager;
   plugin: CopilotPlugin;
   mode?: ChatMode;
+  chatUIState: ChatUIState;
 }
 
 const Chat: React.FC<ChatProps> = ({
-  sharedState,
   chainManager,
   onSaveChat,
   updateUserMessageHistory,
   fileParserManager,
   plugin,
+  chatUIState,
 }) => {
   const settings = useSettingsValue();
   const eventTarget = useContext(EventTargetContext);
-  const [chatHistory, addMessage, clearMessages] = useSharedState(sharedState);
+
+  const { messages: chatHistory, addMessage } = useChatManager(chatUIState);
   const [currentModelKey] = useModelKey();
   const [currentChain] = useChainType();
   const [currentAiMessage, setCurrentAiMessage] = useState("");
@@ -63,6 +71,7 @@ const Chat: React.FC<ChatProps> = ({
   const [includeActiveNote, setIncludeActiveNote] = useState(false);
   const [selectedImages, setSelectedImages] = useState<File[]>([]);
   const [showChatUI, setShowChatUI] = useState(false);
+  const [selectedTextContexts] = useSelectedTextContexts();
 
   const [previousMode, setPreviousMode] = useState<ChainType | null>(null);
   const [selectedChain, setSelectedChain] = useChainType();
@@ -70,7 +79,6 @@ const Chat: React.FC<ChatProps> = ({
 
   const mention = Mention.getInstance();
 
-  const contextProcessor = ContextProcessor.getInstance();
   const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
@@ -93,7 +101,7 @@ const Chat: React.FC<ChatProps> = ({
   const handleSendMessage = async ({
     toolCalls,
     urls,
-    contextNotes: passedContextNotes, // Rename to avoid shadowing
+    contextNotes: passedContextNotes,
   }: {
     toolCalls?: string[];
     urls?: string[];
@@ -101,138 +109,104 @@ const Chat: React.FC<ChatProps> = ({
   } = {}) => {
     if (!inputMessage && selectedImages.length === 0) return;
 
-    const timestamp = formatDateTime(new Date());
+    try {
+      // Create message content array
+      const content: any[] = [];
 
-    // Create message content array
-    const content: any[] = [];
+      // Add text content if present
+      if (inputMessage) {
+        content.push({
+          type: "text",
+          text: inputMessage,
+        });
+      }
 
-    // Add text content if present
-    if (inputMessage) {
-      content.push({
-        type: "text",
-        text: inputMessage,
-      });
-    }
+      // Add images if present
+      for (const image of selectedImages) {
+        const imageData = await image.arrayBuffer();
+        const base64Image = Buffer.from(imageData).toString("base64");
+        content.push({
+          type: "image_url",
+          image_url: {
+            url: `data:${image.type};base64,${base64Image}`,
+          },
+        });
+      }
 
-    // Add images if present
-    for (const image of selectedImages) {
-      const imageData = await image.arrayBuffer();
-      const base64Image = Buffer.from(imageData).toString("base64");
-      content.push({
-        type: "image_url",
-        image_url: {
-          url: `data:${image.type};base64,${base64Image}`,
-        },
-      });
-    }
-
-    const notes = [...(passedContextNotes || [])];
-    const activeNote = app.workspace.getActiveFile();
-    // Only include active note if not in Project mode
-    if (
-      includeActiveNote &&
-      selectedChain !== ChainType.PROJECT_CHAIN &&
-      activeNote &&
-      !notes.some((note) => note.path === activeNote.path)
-    ) {
-      notes.push(activeNote);
-    }
-
-    const userMessage: ChatMessage = {
-      message: inputMessage || "Image message",
-      originalMessage: inputMessage,
-      sender: USER_SENDER,
-      isVisible: true,
-      timestamp: timestamp,
-      content: content,
-      context: {
-        notes,
-        urls: urls || [],
-      },
-    };
-
-    // Clear input and images
-    setInputMessage("");
-    setSelectedImages([]);
-
-    // Add messages to chat history
-    addMessage(userMessage);
-    setLoading(true);
-    setLoadingMessage(LOADING_MESSAGES.DEFAULT);
-
-    // First, process the original user message for custom prompts
-    const customPromptProcessor = CustomPromptProcessor.getInstance(app.vault);
-    const { processedPrompt: processedUserMessage, includedFiles } =
-      await customPromptProcessor.processCustomPrompt(
-        inputMessage || "",
-        "",
-        app.workspace.getActiveFile() as TFile | undefined
+      // Prepare context notes and deduplicate by path
+      const allNotes = [...(passedContextNotes || []), ...contextNotes];
+      const notes = allNotes.filter(
+        (note, index, array) => array.findIndex((n) => n.path === note.path) === index
       );
 
-    // Extract Mentions (such as URLs) from original input message only if using Copilot Plus chain
-    const urlContextAddition =
-      currentChain === ChainType.COPILOT_PLUS_CHAIN
-        ? await mention.processUrls(inputMessage || "")
-        : { urlContext: "", imageUrls: [] };
+      // Handle composer prompt
+      let displayText = inputMessage;
+      const composerPrompt = await getComposerOutputPrompt();
+      if (inputMessage.includes("@composer") && composerPrompt !== "") {
+        displayText =
+          inputMessage + "\n\n<output_format>\n" + composerPrompt + "\n</output_format>";
+      }
 
-    // Create set of file paths that were included in the custom prompt
-    const excludedNotePaths = new Set(includedFiles.map((file) => file.path));
+      // Add tool calls if present
+      if (toolCalls) {
+        displayText += " " + toolCalls.join("\n");
+      }
 
-    // Add context notes, excluding those already processed by custom prompt
-    const noteContextAddition = await contextProcessor.processContextNotes(
-      excludedNotePaths,
-      fileParserManager,
-      app.vault,
-      notes,
-      includeActiveNote,
-      activeNote,
-      currentChain
-    );
-
-    // Combine everything
-    const finalProcessedMessage =
-      processedUserMessage + urlContextAddition.urlContext + noteContextAddition;
-
-    let messageWithToolCalls = inputMessage;
-    // Add tool calls last
-    if (toolCalls) {
-      messageWithToolCalls += " " + toolCalls.join("\n");
-    }
-
-    const promptMessageHidden: ChatMessage = {
-      message: finalProcessedMessage,
-      originalMessage: messageWithToolCalls,
-      sender: USER_SENDER,
-      isVisible: false,
-      timestamp: timestamp,
-      content: content,
-      context: {
+      // Create message context
+      const context = {
         notes,
-        urls:
-          currentChain === ChainType.COPILOT_PLUS_CHAIN
-            ? [...(urls || []), ...urlContextAddition.imageUrls]
-            : urls || [],
-      },
-    };
+        urls: urls || [],
+        selectedTextContexts,
+      };
 
-    // Add hidden user message to chat history
-    addMessage(promptMessageHidden);
+      // Clear input and images
+      setInputMessage("");
+      setSelectedImages([]);
+      setLoading(true);
+      setLoadingMessage(LOADING_MESSAGES.DEFAULT);
 
-    // Add to user message history if there's text
-    if (inputMessage) {
-      updateUserMessageHistory(inputMessage);
+      // Send message through ChatManager (this handles all the complex context processing)
+      const messageId = await chatUIState.sendMessage(
+        displayText,
+        context,
+        currentChain,
+        includeActiveNote
+      );
+
+      // Add to user message history
+      if (inputMessage) {
+        updateUserMessageHistory(inputMessage);
+      }
+
+      // Autosave if enabled
+      if (settings.autosaveChat) {
+        handleSaveAsNote();
+      }
+
+      // Get the LLM message for AI processing
+      const llmMessage = chatUIState.getLLMMessage(messageId);
+      if (llmMessage) {
+        await getAIResponse(
+          llmMessage,
+          chainManager,
+          addMessage,
+          setCurrentAiMessage,
+          setAbortController,
+          { debug: settings.debug, updateLoadingMessage: setLoadingMessage }
+        );
+      }
+
+      // Autosave again after AI response
+      if (settings.autosaveChat) {
+        handleSaveAsNote();
+      }
+    } catch (error) {
+      console.error("Error sending message:", error);
+      new Notice("Failed to send message. Please try again.");
+    } finally {
+      setLoading(false);
+      setLoadingMessage(LOADING_MESSAGES.DEFAULT);
     }
-
-    await getAIResponse(
-      promptMessageHidden,
-      chainManager,
-      addMessage,
-      setCurrentAiMessage,
-      setAbortController,
-      { debug: settings.debug, updateLoadingMessage: setLoadingMessage }
-    );
-    setLoading(false);
-    setLoadingMessage(LOADING_MESSAGES.DEFAULT);
   };
 
   const handleSaveAsNote = useCallback(async () => {
@@ -241,100 +215,14 @@ const Chat: React.FC<ChatProps> = ({
       return;
     }
 
-    // Filter visible messages
-    const visibleMessages = chatHistory.filter((message) => message.isVisible);
-
-    if (visibleMessages.length === 0) {
-      new Notice("No messages to save.");
-      return;
-    }
-
-    // Get the epoch of the first message
-    const firstMessageEpoch = visibleMessages[0].timestamp?.epoch || Date.now();
-
-    // Format the chat content
-    const chatContent = visibleMessages
-      .map(
-        (message) =>
-          `**${message.sender}**: ${message.message}\n[Timestamp: ${message.timestamp?.display}]`
-      )
-      .join("\n\n");
-
     try {
-      // Check if the default folder exists or create it
-      const folder = app.vault.getAbstractFileByPath(settings.defaultSaveFolder);
-      if (!folder) {
-        await app.vault.createFolder(settings.defaultSaveFolder);
-      }
-
-      const { fileName: timestampFileName } = formatDateTime(new Date(firstMessageEpoch));
-
-      // Get the first user message
-      const firstUserMessage = visibleMessages.find((message) => message.sender === USER_SENDER);
-
-      // Get the first 10 words from the first user message and sanitize them
-      const firstTenWords = firstUserMessage
-        ? firstUserMessage.message
-            .split(/\s+/)
-            .slice(0, 10)
-            .join(" ")
-            .replace(/[\\/:*?"<>|]/g, "") // Remove invalid filename characters
-            .trim()
-        : "Untitled Chat";
-
-      // Parse the custom format and replace variables
-      let customFileName = settings.defaultConversationNoteName || "{$date}_{$time}__{$topic}";
-
-      // Create the file name (limit to 100 characters to avoid excessively long names)
-      customFileName = customFileName
-        .replace("{$topic}", firstTenWords.slice(0, 100).replace(/\s+/g, "_"))
-        .replace("{$date}", timestampFileName.split("_")[0])
-        .replace("{$time}", timestampFileName.split("_")[1]);
-
-      // Sanitize the final filename
-      const sanitizedFileName = customFileName.replace(/[\\/:*?"<>|]/g, "_");
-
-      // Add project ID as prefix for project-specific chat histories
-      const currentProject = getCurrentProject();
-      const filePrefix = currentProject ? `${currentProject.id}__` : "";
-      const noteFileName = `${settings.defaultSaveFolder}/${filePrefix}${sanitizedFileName}.md`;
-
-      // Add the timestamp, model, and project properties to the note content
-      const noteContentWithTimestamp = `---
-epoch: ${firstMessageEpoch}
-modelKey: ${currentModelKey}
-${currentProject ? `projectId: ${currentProject.id}` : ""}
-${currentProject ? `projectName: ${currentProject.name}` : ""}
-tags:
-  - ${settings.defaultConversationTag}
-${currentProject ? `  - project-${currentProject.name}` : ""}
----
-
-${chatContent}`;
-
-      // Check if the file already exists
-      const existingFile = app.vault.getAbstractFileByPath(noteFileName);
-      if (existingFile instanceof TFile) {
-        // If the file exists, update its content
-        await app.vault.modify(existingFile, noteContentWithTimestamp);
-        new Notice(`Chat updated in existing note: ${noteFileName}`);
-      } else {
-        // If the file doesn't exist, create a new one
-        await app.vault.create(noteFileName, noteContentWithTimestamp);
-        new Notice(`Chat saved as note: ${noteFileName}`);
-      }
+      // Use the new ChatManager persistence functionality
+      await chatUIState.saveChat(currentModelKey);
     } catch (error) {
       console.error("Error saving chat as note:", err2String(error));
       new Notice("Failed to save chat as note. Check console for details.");
     }
-  }, [
-    app,
-    chatHistory,
-    currentModelKey,
-    settings.defaultConversationTag,
-    settings.defaultSaveFolder,
-    settings.defaultConversationNoteName,
-  ]);
+  }, [app, chatUIState, currentModelKey]);
 
   const handleStopGenerating = useCallback(
     (reason?: ABORT_REASON) => {
@@ -344,6 +232,9 @@ ${chatContent}`;
         }
         abortController.abort(reason);
         setLoading(false);
+        setLoadingMessage(LOADING_MESSAGES.DEFAULT);
+        // Keep the partial AI message visible
+        // Don't clear setCurrentAiMessage here
       }
     },
     [abortController, settings.debug]
@@ -351,44 +242,34 @@ ${chatContent}`;
 
   const handleRegenerate = useCallback(
     async (messageIndex: number) => {
-      const lastUserMessageIndex = messageIndex - 1;
-
-      if (lastUserMessageIndex < 0 || chatHistory[lastUserMessageIndex].sender !== USER_SENDER) {
-        new Notice("Cannot regenerate the first message or a user message.");
+      if (messageIndex <= 0) {
+        new Notice("Cannot regenerate the first message.");
         return;
       }
 
-      // Get the last user message
-      const lastUserMessage = chatHistory[lastUserMessageIndex];
-
-      // Remove all messages after the AI message to regenerate
-      const newChatHistory = chatHistory.slice(0, messageIndex);
-      clearMessages();
-      newChatHistory.forEach(addMessage);
-
-      // Update the chain's memory with the new chat history
-      chainManager.memoryManager.clearChatMemory();
-      for (let i = 0; i < newChatHistory.length; i += 2) {
-        const userMsg = newChatHistory[i];
-        const aiMsg = newChatHistory[i + 1];
-        if (userMsg && aiMsg) {
-          await chainManager.memoryManager
-            .getMemory()
-            .saveContext({ input: userMsg.message }, { output: aiMsg.message });
-        }
+      const messageToRegenerate = chatHistory[messageIndex];
+      if (!messageToRegenerate) {
+        new Notice("Message not found.");
+        return;
       }
 
       setLoading(true);
       try {
-        const regeneratedResponse = await chainManager.runChain(
-          lastUserMessage,
-          new AbortController(),
+        const success = await chatUIState.regenerateMessage(
+          messageToRegenerate.id!,
           setCurrentAiMessage,
-          addMessage,
-          { debug: settings.debug }
+          addMessage
         );
-        if (regeneratedResponse && settings.debug) {
+
+        if (!success) {
+          new Notice("Failed to regenerate message. Please try again.");
+        } else if (settings.debug) {
           console.log("Message regenerated successfully");
+        }
+
+        // Autosave the chat if the setting is enabled
+        if (settings.autosaveChat) {
+          handleSaveAsNote();
         }
       } catch (error) {
         console.error("Error regenerating message:", error);
@@ -397,44 +278,81 @@ ${chatContent}`;
         setLoading(false);
       }
     },
-    [addMessage, chainManager, chatHistory, clearMessages, settings.debug]
+    [chatHistory, chatUIState, settings.debug, settings.autosaveChat, handleSaveAsNote, addMessage]
   );
 
   const handleEdit = useCallback(
     async (messageIndex: number, newMessage: string) => {
-      const oldMessage = chatHistory[messageIndex].message;
-
-      // Check if the message has actually changed
-      if (oldMessage === newMessage) {
+      const messageToEdit = chatHistory[messageIndex];
+      if (!messageToEdit || messageToEdit.message === newMessage) {
         return;
       }
 
-      const newChatHistory = [...chatHistory];
+      try {
+        const success = await chatUIState.editMessage(
+          messageToEdit.id!,
+          newMessage,
+          currentChain,
+          includeActiveNote
+        );
 
-      // Find and update all related messages (both visible and hidden)
-      for (let i = messageIndex; i < newChatHistory.length; i++) {
-        if (newChatHistory[i].originalMessage === oldMessage) {
-          newChatHistory[i].message = newMessage;
-          newChatHistory[i].originalMessage = newMessage;
-          newChatHistory[i].context = { notes: [], urls: [] };
+        if (!success) {
+          new Notice("Failed to edit message. Please try again.");
+          return;
         }
-      }
 
-      clearMessages();
-      newChatHistory.forEach(addMessage);
+        // For user messages, immediately truncate any AI responses and regenerate
+        if (messageToEdit.sender === USER_SENDER) {
+          // Check if there were AI responses after this message
+          const hadAIResponses = messageIndex < chatHistory.length - 1;
 
-      // Update the chain's memory with the new chat history
-      await updateChatMemory(newChatHistory, chainManager.memoryManager);
+          // Truncate all messages after this user message (removes old AI responses)
+          await chatUIState.truncateAfterMessageId(messageToEdit.id!);
 
-      // Trigger regeneration of the AI message if the edited message was from the user
-      if (
-        newChatHistory[messageIndex].sender === USER_SENDER &&
-        messageIndex < newChatHistory.length - 1
-      ) {
-        handleRegenerate(messageIndex + 1);
+          // If there were AI responses, generate new ones
+          if (hadAIResponses) {
+            setLoading(true);
+            try {
+              const llmMessage = chatUIState.getLLMMessage(messageToEdit.id!);
+              if (llmMessage) {
+                await getAIResponse(
+                  llmMessage,
+                  chainManager,
+                  addMessage,
+                  setCurrentAiMessage,
+                  setAbortController,
+                  { debug: settings.debug, updateLoadingMessage: setLoadingMessage }
+                );
+              }
+            } catch (error) {
+              console.error("Error regenerating AI response:", error);
+              new Notice("Failed to regenerate AI response. Please try again.");
+            } finally {
+              setLoading(false);
+            }
+          }
+        }
+
+        // Autosave the chat if the setting is enabled
+        if (settings.autosaveChat) {
+          handleSaveAsNote();
+        }
+      } catch (error) {
+        console.error("Error editing message:", error);
+        new Notice("Failed to edit message. Please try again.");
       }
     },
-    [addMessage, chainManager.memoryManager, chatHistory, clearMessages, handleRegenerate]
+    [
+      chatHistory,
+      chatUIState,
+      currentChain,
+      includeActiveNote,
+      addMessage,
+      chainManager,
+      settings.debug,
+      settings.autosaveChat,
+      handleSaveAsNote,
+    ]
   );
 
   const createEffect = (
@@ -448,31 +366,37 @@ ${chatContent}`;
           event.detail.selectedText,
           event.detail.eventSubtype
         );
-        // Create a user message with the selected text
-        const promptMessage: ChatMessage = {
-          message: messageWithPrompt,
-          sender: USER_SENDER,
-          isVisible: debug,
-          timestamp: formatDateTime(new Date()),
-        };
 
-        if (debug) {
-          addMessage(promptMessage);
-        }
+        // Send the prompt message through ChatManager (simplified approach)
+        try {
+          const messageId = await chatUIState.sendMessage(
+            messageWithPrompt,
+            { notes: [], urls: [], selectedTextContexts: [] },
+            currentChain,
+            includeActiveNote
+          );
 
-        setLoading(true);
-        await getAIResponse(
-          promptMessage,
-          chainManager,
-          addMessage,
-          setCurrentAiMessage,
-          setAbortController,
-          {
-            debug,
-            ignoreSystemMessage: true,
+          // Get the LLM message for AI processing
+          const llmMessage = chatUIState.getLLMMessage(messageId);
+          if (llmMessage) {
+            setLoading(true);
+            await getAIResponse(
+              llmMessage,
+              chainManager,
+              addMessage,
+              setCurrentAiMessage,
+              setAbortController,
+              {
+                debug,
+                ignoreSystemMessage: true,
+              }
+            );
+            setLoading(false);
           }
-        );
-        setLoading(false);
+        } catch (error) {
+          console.error("Error processing adhoc prompt:", error);
+          setLoading(false);
+        }
       };
 
       eventTarget?.addEventListener(eventType, handleSelection);
@@ -484,32 +408,17 @@ ${chatContent}`;
     };
   };
 
-  const customPromptProcessor = CustomPromptProcessor.getInstance(app.vault);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(
-    createEffect(COMMAND_IDS.APPLY_CUSTOM_PROMPT, async (selectedText, customPrompt) => {
-      if (!customPrompt) {
-        return selectedText;
-      }
-      const result = await customPromptProcessor.processCustomPrompt(
-        customPrompt,
-        selectedText,
-        app.workspace.getActiveFile() ?? undefined
-      );
-      return result.processedPrompt; // Extract just the processed prompt string
-    }),
-    []
-  );
   // eslint-disable-next-line react-hooks/exhaustive-deps
   useEffect(
     createEffect(COMMAND_IDS.APPLY_ADHOC_PROMPT, async (selectedText, customPrompt) => {
       if (!customPrompt) {
         return selectedText;
       }
-      const result = await customPromptProcessor.processCustomPrompt(
+      const result = await processPrompt(
         customPrompt,
         selectedText,
-        app.workspace.getActiveFile() as TFile | undefined
+        app.vault,
+        app.workspace.getActiveFile()
       );
       return result.processedPrompt; // Extract just the processed prompt string
     }),
@@ -522,19 +431,6 @@ ${chatContent}`;
       onSaveChat(handleSaveAsNote);
     }
   }, [onSaveChat, handleSaveAsNote]);
-
-  const handleDelete = useCallback(
-    async (messageIndex: number) => {
-      const newChatHistory = [...chatHistory];
-      newChatHistory.splice(messageIndex, 1);
-      clearMessages();
-      newChatHistory.forEach(addMessage);
-
-      // Update the chain's memory with the new chat history
-      await updateChatMemory(newChatHistory, chainManager.memoryManager);
-    },
-    [addMessage, chainManager.memoryManager, chatHistory, clearMessages]
-  );
 
   const handleAddProject = useCallback(
     (project: ProjectConfig) => {
@@ -608,14 +504,46 @@ ${chatContent}`;
     setInputMessage((prev) => `${prev} ${prompt} `);
   }, []);
 
+  const handleRemoveSelectedText = useCallback((id: string) => {
+    removeSelectedTextContext(id);
+  }, []);
+
+  const handleDelete = useCallback(
+    async (messageIndex: number) => {
+      const messageToDelete = chatHistory[messageIndex];
+      if (!messageToDelete) {
+        new Notice("Message not found.");
+        return;
+      }
+
+      try {
+        const success = await chatUIState.deleteMessage(messageToDelete.id!);
+        if (!success) {
+          new Notice("Failed to delete message. Please try again.");
+        }
+      } catch (error) {
+        console.error("Error deleting message:", error);
+        new Notice("Failed to delete message. Please try again.");
+      }
+    },
+    [chatHistory, chatUIState]
+  );
+
   const handleNewChat = useCallback(async () => {
     handleStopGenerating(ABORT_REASON.NEW_CHAT);
-    // Delegate to the shared plugin method for consistent behavior
-    await plugin.handleNewChat();
+
+    // First autosave the current chat if the setting is enabled
+    if (settings.autosaveChat) {
+      await handleSaveAsNote();
+    }
+
+    // Clear messages through the new architecture
+    chatUIState.clearMessages();
 
     // Additional UI state reset specific to this component
     setCurrentAiMessage("");
     setContextNotes([]);
+    clearSelectedTextContexts();
     // Only modify includeActiveNote if in a non-COPILOT_PLUS_CHAIN mode
     // In COPILOT_PLUS_CHAIN mode, respect the settings.includeActiveNoteAsContext value
     if (selectedChain !== ChainType.COPILOT_PLUS_CHAIN) {
@@ -623,11 +551,33 @@ ${chatContent}`;
     } else {
       setIncludeActiveNote(settings.includeActiveNoteAsContext);
     }
-  }, [handleStopGenerating, plugin, settings.includeActiveNoteAsContext, selectedChain]);
+  }, [
+    handleStopGenerating,
+    chatUIState,
+    settings.autosaveChat,
+    settings.includeActiveNoteAsContext,
+    selectedChain,
+    handleSaveAsNote,
+  ]);
 
   const handleLoadHistory = useCallback(() => {
     plugin.loadCopilotChatHistory();
   }, [plugin]);
+
+  // Event listener for abort stream events
+  useEffect(() => {
+    const handleAbortStream = (event: CustomEvent) => {
+      const reason = event.detail?.reason || ABORT_REASON.NEW_CHAT;
+      handleStopGenerating(reason);
+    };
+
+    eventTarget?.addEventListener(EVENT_NAMES.ABORT_STREAM, handleAbortStream);
+
+    // Cleanup function
+    return () => {
+      eventTarget?.removeEventListener(EVENT_NAMES.ABORT_STREAM, handleAbortStream);
+    };
+  }, [eventTarget, handleStopGenerating]);
 
   // Use the includeActiveNoteAsContext setting
   useEffect(() => {
@@ -641,6 +591,9 @@ ${chatContent}`;
       }
     }
   }, [settings.includeActiveNoteAsContext, selectedChain]);
+
+  // Note: pendingMessages loading has been removed as ChatManager now handles
+  // message persistence and loading automatically based on project context
 
   const renderChatComponents = () => (
     <>
@@ -688,6 +641,8 @@ ${chatContent}`;
           onAddImage={(files: File[]) => setSelectedImages((prev) => [...prev, ...files])}
           setSelectedImages={setSelectedImages}
           disableModelSwitch={selectedChain === ChainType.PROJECT_CHAIN}
+          selectedTextContexts={selectedTextContexts}
+          onRemoveSelectedText={handleRemoveSelectedText}
         />
       </div>
     </>

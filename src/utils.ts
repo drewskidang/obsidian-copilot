@@ -12,7 +12,7 @@ import {
 } from "@/constants";
 import { logInfo } from "@/logger";
 import { CopilotSettings } from "@/settings/model";
-import { ChatMessage } from "@/sharedState";
+import { ChatMessage } from "@/types/message";
 import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { MemoryVariables } from "@langchain/core/memory";
 import { RunnableSequence } from "@langchain/core/runnables";
@@ -184,6 +184,8 @@ export function getNotesFromTags(vault: Vault, tags: string[], noteFiles?: TFile
   return filesWithTag;
 }
 
+// TODO: Chain type conversion still needed for chain runner selection
+// This function is still used but the underlying chain infrastructure is deprecated
 export const stringToChainType = (chain: string): ChainType => {
   switch (chain) {
     case "llm_chain":
@@ -197,6 +199,8 @@ export const stringToChainType = (chain: string): ChainType => {
   }
 };
 
+// TODO: These chain validation functions are deprecated
+// Remove after confirming chainManager no longer uses them
 export const isLLMChain = (chain: RunnableSequence): chain is RunnableSequence => {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return (chain as any).last.bound.modelName || (chain as any).last.bound.model;
@@ -274,6 +278,16 @@ export async function getFileContent(file: TFile, vault: Vault): Promise<string 
 
 export function getFileName(file: TFile): string {
   return file.basename;
+}
+
+/**
+ * Check if a file is allowed for context (markdown, PDF, or canvas files)
+ * @param file The file to check
+ * @returns true if the file is allowed, false otherwise
+ */
+export function isAllowedFileForContext(file: TFile | null): boolean {
+  if (!file) return false;
+  return file.extension === "md" || file.extension === "pdf" || file.extension === "canvas";
 }
 
 export async function getAllNotesContent(vault: Vault): Promise<string> {
@@ -473,6 +487,11 @@ export function extractYoutubeUrl(text: string): string | null {
   return match ? match[0] : null;
 }
 
+export function extractAllYoutubeUrls(text: string): string[] {
+  const matches = text.matchAll(new RegExp(YOUTUBE_URL_REGEX, "g"));
+  return Array.from(matches, (match) => match[0]);
+}
+
 /** Proxy function to use in place of fetch() to bypass CORS restrictions.
  * It currently doesn't support streaming until this is implemented
  * https://forum.obsidian.md/t/support-streaming-the-request-and-requesturl-response-body/87381 */
@@ -482,12 +501,6 @@ export async function safeFetch(url: string, options: RequestInit = {}): Promise
 
   // Remove content-length if it exists
   delete (headers as Record<string, string>)["content-length"];
-
-  if (typeof options.body === "string") {
-    const newBody = JSON.parse(options.body ?? {});
-    delete newBody["frequency_penalty"];
-    options.body = JSON.stringify(newBody);
-  }
 
   logInfo("==== safeFetch method request ====");
 
@@ -662,10 +675,14 @@ export async function insertIntoEditor(message: string, replace: boolean = false
   const editor = leaf.view.editor;
   const cursorFrom = editor.getCursor("from");
   const cursorTo = editor.getCursor("to");
+
+  // Remove think tags before inserting
+  const cleanedMessage = removeThinkTags(message);
+
   if (replace) {
-    editor.replaceRange(message, cursorFrom, cursorTo);
+    editor.replaceRange(cleanedMessage, cursorFrom, cursorTo);
   } else {
-    editor.replaceRange(message, cursorTo);
+    editor.replaceRange(cleanedMessage, cursorTo);
   }
   new Notice("Message inserted into the active note.");
 }
@@ -804,8 +821,11 @@ export function extractTextFromChunk(content: any): string {
 export function removeThinkTags(text: any): string {
   // First convert any content format to plain text
   const plainText = extractTextFromChunk(text);
-  // Then remove think tags
-  return plainText.replace(/<think>[\s\S]*?<\/think>/g, "").trim();
+  // Remove complete think tags and their content
+  let cleanedText = plainText.replace(/<think>[\s\S]*?<\/think>/g, "");
+  // Remove any remaining unclosed think tags (for streaming scenarios)
+  cleanedText = cleanedText.replace(/<think>[\s\S]*$/g, "");
+  return cleanedText.trim();
 }
 
 export function randomUUID() {
